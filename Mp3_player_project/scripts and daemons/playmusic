@@ -1,0 +1,12 @@
+#!/bin/sh
+
+song="/root/superMusic/winxp.mp3"
+
+#Adding the sound module to kernel
+modprobe snd-bcm2835
+
+#Load the song to the musicplayer
+mpg123 "$song"
+
+#Kill the mp3player process
+killall -KILL mpg123

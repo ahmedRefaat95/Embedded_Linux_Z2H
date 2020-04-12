@@ -1,0 +1,224 @@
+#!/bin/bash
+
+set -e
+#modprobe snd-bcm2835 #This will wire up the sound card with alsa
+
+PLAYER="/"
+test -d ${PLAYER} || exit 1
+
+i=0
+cursor=0
+
+#button_state acts a toggling flag for the PLAY/PAUSE button
+button_state=0
+
+FirstTimeFlag=0
+PlayingFlag=0
+
+index=0
+
+creatingarray(){
+	i=0
+	cursor=0
+	button_state=0
+	PlayingFlag=0
+	FirstTimeFlag=0
+	
+	arr=()
+	while IFS= read -r var
+	do 
+  		i=$[ $i +1 ]
+  		arr+=($var)
+	done <<< $(find $PLAYER -iname "*mp3") 
+	Max=$[$i -1]
+	Min=0
+}
+
+#Calling the creating array function
+creatingarray
+
+#Setting the GPIO configurations for pins
+if [ ! -d /sys/class/gpio/gpio4 ] ; then # check if export process has done before(play/pause)
+    echo "4" > /sys/class/gpio/export
+    echo "in" > /sys/class/gpio/gpio4/direction
+fi
+if [ ! -d /sys/class/gpio/gpio17 ] ; then # check if export process has done before(next)
+    echo "17" > /sys/class/gpio/export
+    echo "in" > /sys/class/gpio/gpio17/direction
+fi
+if [ ! -d /sys/class/gpio/gpio18 ] ; then # check if export process has done before(previous)
+    echo "18" > /sys/class/gpio/export
+    echo "in" > /sys/class/gpio/gpio18/direction
+fi
+if [ ! -d /sys/class/gpio/gpio16 ] ; then # check if export process has done before(shuffle)
+    echo "16" > /sys/class/gpio/export
+    echo "in" > /sys/class/gpio/gpio18/direction
+fi
+
+if [ ! -f  /root/superMusic/somethingChanged.conf ] ; then # check if not exists
+    echo "FLAG=0" > /root/superMusic/somethingChanged.conf
+    chmod 777 /root/superMusic/somethingChanged.conf
+fi
+
+if [ ! -f  /root/superMusic/commandLines.conf ] ; then # check if not exists
+    echo "PLAY_FLAG=0\nPAUSE_FLAG=0\nSHUFFLE_FLAG=0\nNEXT_FLAG=0\nPREVIOUS_FLAG=0" > /root/superMusic/commandLines.conf
+    chmod 777 /root/superMusic/commandLines.conf
+fi
+
+counter=0
+while true; do
+  counter=$[ $counter +1 ]
+  #Checking whether the counter has reached the clearing value (800) or not
+  if [ $counter -gt 800 ] ; then
+	counter=0
+	 if [  $FirstTimeFlag  -eq 0 ] ; then
+		#Display a message on the SSH terminal when no song is playing
+        	wall -n " Nothing is played right now " # -n  to suppress
+        elif [ $PlayingFlag -eq 0 ] ; then
+		#Display the name of the current song on the SSH terminal when pause
+                wall -n " ${arr[$cursor]} song is now paused"
+        else
+		#Display the name of the current song on the SSH terminal when playing
+                wall -n " ${arr[$cursor]} is being played right now"
+        fi
+  fi
+  #Run the somethingChanged.conf in the current running shell to define the variable "FLAG" in the current shell
+  source /root/superMusic/somethingChanged.conf
+  #Run the somethingChanged.conf in the current running shell to define STATE FLAGS in the current shell
+  source /root/superMusic/commandLines.conf
+
+
+  if [[  $FLAG -eq 1  ]] ; then 
+    echo "something changed"
+    #if something has changed repeat the previous checking steps
+    killall -KILL mpg123 2>/dev/null
+    creatingarray
+    #Resetting the value of the "FLAG" variable
+    echo "FLAG=0" > /root/superMusic/somethingChanged.conf
+  fi
+
+  #GPIO button readings
+
+  if [ $(cat /sys/class/gpio/gpio4/value) -eq 1 -o $PLAY_FLAG -eq 1 -o $PAUSE_FLAG -eq 1 ] ; then #if anyone pushed the button ==> PLAY/PAUSE
+
+    if [ $FirstTimeFlag -eq 0 ] ; then 
+      #Play the first song in the background
+      mpg123 ${arr[@]:$cursor} &
+      FirstTimeFlag=1
+      button_state=1
+      #Current state of player: playing
+      PlayingFlag=1
+      sleep 0.5
+      continue
+    fi
+
+    #PLAY/PAUSE button state
+    #Play state
+    if [ $button_state -eq 0 -o $PLAY_FLAG -eq 1 ]
+      then
+      killall -CONT mpg123 2>/dev/null
+      PlayingFlag=1
+      button_state=1
+      sleep 0.4
+    #Pause state
+    elif [ $button_state -eq 1 -o $PAUSE_FLAG -eq 1 ]
+    then
+      killall -STOP  mpg123 2>/dev/null
+      PlayingFlag=0
+      button_state=0
+      sleep 0.4 # to allow finger release
+    fi
+   echo $'PLAY_FLAG=0\nPAUSE_FLAG=0\nSHUFFLE_FLAG=0\nNEXT_FLAG=0\nPREVIOUS_FLAG=0' > /root/superMusic/commandLines.conf
+  fi
+
+  #Condition when the next button is pressed
+  if [ $(cat /sys/class/gpio/gpio17/value) -eq 1 -o $NEXT_FLAG -eq 1 ] ; then #next
+     if [ $PlayingFlag -eq 1 ] ; then 
+      if [ $cursor -lt $Max ] ; then 
+        killall -KILL mpg123 2>/dev/null
+        sleep 0.5
+        cursor=$[ $cursor +1 ]
+	#if the cursor reached the max value, reset to the min
+	if [ $cursor -eq $Max ] ; then
+		cursor=$Min
+	fi
+        echo "playing song = $cursor"
+        mpg123 ${arr[@]:$cursor} &
+        
+      fi
+    fi
+   echo $'PLAY_FLAG=0\nPAUSE_FLAG=0\nSHUFFLE_FLAG=0\nNEXT_FLAG=0\nPREVIOUS_FLAG=0' > /root/superMusic/commandLines.conf
+  fi
+
+  #Condition when the previous button is pressed
+  if [ $(cat /sys/class/gpio/gpio18/value) -eq 1 ] ; then #previous
+     if [ $PlayingFlag -eq 1 ] ; then  
+      if [ $cursor -ge $Min ] ; then 	
+	while [ $(cat /sys/class/gpio/gpio18/value) -eq 1 ]
+	do
+		:
+	done
+	
+	for (( index=0; index<10; index++ ))
+	do
+		#Checking whether the button was pressed again during 1 Sec
+		if [ $(cat /sys/class/gpio/gpio18/value) -eq 1 ] ; then
+
+			cursor=$[ $cursor -1 ]
+			if [ $cursor -lt $Min ] ; then
+				cursor=$Max
+			fi
+			break;	
+	
+		fi
+		sleep 0.1
+	done
+	killall -KILL mpg123 2>/dev/null
+	echo "playing song = $cursor"
+	#Resume the player with the new cursor
+        mpg123 ${arr[@]:$cursor} &
+	sleep 0.4 # to allow finger release
+	
+     fi
+    fi
+   echo $'PLAY_FLAG=0\nPAUSE_FLAG=0\nSHUFFLE_FLAG=0\nNEXT_FLAG=0\nPREVIOUS_FLAG=0' > /root/superMusic/commandLines.conf
+  fi
+
+
+  if [ $PREVIOUS_FLAG -eq 1 ] ; then #previous
+     if [ $PlayingFlag -eq 1 ] ; then  
+      if [ $cursor -ge $Min ] ; then 	
+	
+	cursor=$[ $cursor -1 ]
+	if [ $cursor -lt $Min ] ; then
+		cursor=0
+	fi
+			
+	killall -KILL mpg123 2>/dev/null
+	echo "playing song = $cursor"
+	#Resume the player with the new cursor
+        mpg123 ${arr[@]:$cursor} &
+	sleep 0.4 # to allow finger release
+	
+     fi
+    fi
+   echo $'PLAY_FLAG=0\nPAUSE_FLAG=0\nSHUFFLE_FLAG=0\nNEXT_FLAG=0\nPREVIOUS_FLAG=0' > /root/superMusic/commandLines.conf
+  fi
+
+  #Condition when the shuffle button is pressed
+  if [ $(cat /sys/class/gpio/gpio16/value) -eq 1 -o $SHUFFLE_FLAG -eq 1 ] ; then #shuffle	
+     if [ $PlayingFlag -eq 1 ] ; then 
+      if [ $cursor -lt $Max ] ; then 
+        killall -KILL mpg123 2>/dev/null
+        sleep 0.5
+	#Generating a random number between Min=0 and Max
+	cursor=$[ $RANDOM % $Max + $Min ] 
+        echo "playing song = $cursor"
+        mpg123 ${arr[@]:$cursor} &
+        
+      fi
+    fi
+   echo $'PLAY_FLAG=0\nPAUSE_FLAG=0\nSHUFFLE_FLAG=0\nNEXT_FLAG=0\nPREVIOUS_FLAG=0' > /root/superMusic/commandLines.conf
+  fi
+done
+
